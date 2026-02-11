@@ -1,0 +1,39 @@
+# Clinical rules for ECG interpretation
+
+rhythm:
+  normal_sinus:
+    hr_min_bpm: 60
+    hr_max_bpm: 100
+    rr_std_max_ms: 120
+    pr_min_ms: 120
+    pr_max_ms: 200
+    p_wave_presence_min: 0.8
+
+  sinus_bradycardia:
+    hr_max_bpm: 60
+
+  sinus_tachycardia:
+    hr_min_bpm: 100
+
+conduction:
+  prolonged_pr:
+    threshold_ms: 200
+
+  prolonged_qrs:
+    threshold_ms: 120
+
+  prolonged_qtc:
+    male_threshold_ms: 450
+    female_threshold_ms: 460
+    severe_threshold_ms: 500
+
+vitals_validation:
+  hr_discrepancy_threshold_bpm: 5
+  hr_discrepancy_severe_bpm: 20
+
+severity_mapping:
+  normal: 0
+  mild: 1
+  moderate: 2
+  severe: 3
+  critical: 4

@@ -1,0 +1,42 @@
+# Model hyperparameters for ECG interpretation system
+
+denoiser:
+  in_channels: 7
+  base_channels: 32
+  depth: 4
+  learning_rate: 0.001
+  batch_size: 16
+  epochs: 100
+
+mamba:
+  d_model: 256
+  d_state: 64
+  n_layers: 4
+  patch_size: 10
+  learning_rate: 0.0005
+  batch_size: 8
+
+swin:
+  embed_dim: 128
+  depths: [2, 2, 6, 2]
+  num_heads: [4, 8, 16, 32]
+  window_sizes: [20, 100, 400, 2400]
+  patch_size: 4
+  learning_rate: 0.0005
+  batch_size: 8
+
+fusion:
+  strategy: "concat_project"  # "concat_project" or "cross_attention"
+  output_dim: 256
+
+heatmap_decoder:
+  num_fiducial_types: 9
+  base_channels: 64
+  learning_rate: 0.001
+  batch_size: 16
+
+gnn:
+  d_hidden: 128
+  n_layers: 2
+  n_heads: 4
+  dropout: 0.1
