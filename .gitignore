@@ -36,3 +36,5 @@ htmlcov/
 
 # MyPy
 .mypy_cache/
+
+output/

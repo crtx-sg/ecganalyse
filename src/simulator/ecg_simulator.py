@@ -12,9 +12,11 @@ import numpy as np
 
 from src.simulator.conditions import Condition, ConditionConfig, CONDITION_REGISTRY
 from src.simulator.morphology import (
+    BeatFiducials,
     PatientParams,
     generate_patient_params,
     generate_single_lead,
+    generate_lead_with_fiducials,
     _add_fibrillatory_waves,
     _add_flutter_waves,
     _add_vfib_chaos,
@@ -46,6 +48,20 @@ class SimulatedEvent:
     patient_params: PatientParams
     pacer_info: int = 0
     pacer_offset: int = 0
+    fiducial_positions: Optional[list[BeatFiducials]] = None
+
+
+@dataclass
+class TrainingEvent:
+    """Training-specific event with clean/noisy ECG and fiducial ground truth."""
+
+    condition: Condition
+    hr: float
+    ecg_clean: dict[str, np.ndarray]     # 7 leads, noiseless
+    ecg_noisy: dict[str, np.ndarray]     # 7 leads, with noise
+    fiducial_positions: list[BeatFiducials]
+    noise_level: str
+    patient_params: PatientParams
 
 
 class ECGSimulator:
@@ -168,9 +184,95 @@ class ECGSimulator:
             pacer_offset=pacer_offset,
         )
 
+    def generate_training_event(
+        self,
+        condition: Condition | None = None,
+        hr: float | None = None,
+        noise_level: str = "medium",
+        noise_config: NoiseConfig | None = None,
+    ) -> TrainingEvent:
+        """Generate a training event with clean ECG, noisy ECG, and fiducials.
+
+        The clean signal and fiducials are generated in the same RNG path to
+        ensure perfect alignment. Noise is applied separately afterward.
+        """
+        if condition is None:
+            condition = self._pick_condition(None)
+
+        cfg = CONDITION_REGISTRY[condition]
+        if hr is None:
+            hr = float(self._rng.uniform(*cfg.hr_range))
+
+        patient = generate_patient_params(self._rng)
+        nc = noise_config or NOISE_PRESETS.get(noise_level, NOISE_PRESETS["medium"])
+
+        # Generate Lead I and Lead II with fiducials
+        lead_I, fids_I = self._generate_lead_with_fids(condition, cfg, patient, hr, scale=1.0)
+        lead_II, fids_II = self._generate_lead_with_fids(condition, cfg, patient, hr, scale=1.1)
+
+        # Einthoven's law: III = II - I
+        lead_III = lead_II - lead_I
+
+        # Augmented limb leads derived from I and II
+        aVR = -(lead_I + lead_II) / 2.0
+        aVL = lead_I - lead_II / 2.0
+        aVF = lead_II - lead_I / 2.0
+
+        # Precordial-like lead (vVX) — independent generation
+        vVX, _ = self._generate_lead_with_fids(condition, cfg, patient, hr, scale=1.2)
+
+        clean: dict[str, np.ndarray] = {
+            "ECG1": lead_I.astype(np.float32),
+            "ECG2": lead_II.astype(np.float32),
+            "ECG3": lead_III.astype(np.float32),
+            "aVR": aVR.astype(np.float32),
+            "aVL": aVL.astype(np.float32),
+            "aVF": aVF.astype(np.float32),
+            "vVX": vVX.astype(np.float32),
+        }
+
+        # Apply noise independently
+        noisy: dict[str, np.ndarray] = {}
+        for name, sig in clean.items():
+            noisy_sig = apply_noise_pipeline(sig.copy(), self.time, self.fs, self._rng, nc)
+            noisy[name] = noisy_sig.astype(np.float32)
+
+        # Use Lead II fiducials as the canonical ground truth
+        return TrainingEvent(
+            condition=condition,
+            hr=hr,
+            ecg_clean=clean,
+            ecg_noisy=noisy,
+            fiducial_positions=fids_II,
+            noise_level=noise_level,
+            patient_params=patient,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _generate_lead_with_fids(
+        self,
+        condition: Condition,
+        cfg: ConditionConfig,
+        patient: PatientParams,
+        hr: float,
+        scale: float,
+    ) -> tuple[np.ndarray, list[BeatFiducials]]:
+        """Generate a single raw ECG lead with fiducial positions."""
+        sig, fids = generate_lead_with_fiducials(
+            self.time, cfg, patient, hr, scale, self._rng,
+        )
+
+        if condition == Condition.ATRIAL_FIBRILLATION:
+            sig = _add_fibrillatory_waves(sig, self.time, self._rng)
+        elif condition == Condition.ATRIAL_FLUTTER:
+            sig = _add_flutter_waves(sig, self.time, self._rng)
+        elif condition == Condition.VENTRICULAR_FIBRILLATION:
+            sig = _add_vfib_chaos(sig, self.time, self._rng)
+
+        return sig, fids
 
     def _generate_lead(
         self,

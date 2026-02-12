@@ -1,0 +1,55 @@
+# Training pipeline hyperparameters
+
+stage_a:
+  description: "Denoiser training (self-supervised: noisy → clean)"
+  epochs: 100
+  batch_size: 16
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epoch_size: 5000
+  val_size: 500
+  patience: 10
+  warmup_steps: 500
+  noise_levels: ["low", "medium"]
+  loss:
+    alpha: 1.0   # MSE weight
+    beta: 0.1    # spectral L1 weight
+
+stage_b:
+  description: "Encoder + decoder training (frozen denoiser)"
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  epoch_size: 5000
+  val_size: 500
+  patience: 15
+  noise_levels: ["clean", "low", "medium"]
+  loss:
+    alpha: 1.0        # BCE weight
+    beta: 1.0         # Dice weight
+    pos_weight: 50.0  # positive class weight
+
+stage_c:
+  description: "Full pipeline fine-tuning with discriminative LR"
+  epochs: 50
+  batch_size: 4
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  epoch_size: 5000
+  val_size: 500
+  patience: 15
+  noise_levels: ["clean", "low", "medium", "high"]
+  discriminative_lr:
+    denoiser: 0.01    # multiplier (= 1e-6 effective)
+    encoder: 0.1      # multiplier (= 1e-5 effective)
+    decoder: 1.0      # multiplier (= 1e-4 effective)
+
+heatmap_targets:
+  sigma: 4.0          # Gaussian std in samples (20ms at 200Hz)
+
+data:
+  fs: 200.0
+  duration: 12.0
+  n_samples: 2400
+  num_leads: 7
