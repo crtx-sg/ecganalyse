@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional  # noqa: F811
 
 import yaml
 
@@ -47,8 +47,20 @@ class RuleBasedReasoningEngine:
         measurements: GlobalMeasurements,
         rhythm_metrics: dict[str, float],
         beats: list[Beat],
+        condition_prediction: Optional[dict] = None,
     ) -> RhythmAnalysis:
-        """Classify heart rhythm from measurements and beat data."""
+        """Classify heart rhythm from measurements and beat data.
+
+        Args:
+            measurements: Global ECG measurements.
+            rhythm_metrics: Rhythm-level metrics (p_wave_presence_ratio, regularity_score).
+            beats: Detected beats from Phase 3.
+            condition_prediction: Optional neural condition prediction from
+                :class:`~src.prediction.condition_classifier.ConditionClassifier`.
+                If provided with ``confidence >= 0.7``, the neural prediction
+                augments or overrides the rule-based classification for conditions
+                that rules alone struggle with.
+        """
         hr = measurements.heart_rate_bpm
         rr_std = measurements.rr_std_ms
         p_ratio = rhythm_metrics.get("p_wave_presence_ratio", 0.0)
@@ -88,6 +100,33 @@ class RuleBasedReasoningEngine:
             else:
                 classification = "normal_sinus_rhythm"
                 confidence = 0.7
+
+        # Neural condition prediction override/augmentation
+        # The trained ECG-TransCovNet can detect conditions that are hard
+        # to distinguish from measurements alone (e.g. AFib vs AFlutter,
+        # bundle-branch blocks, VTach, VFib, ST elevation).
+        if condition_prediction is not None:
+            nn_label = condition_prediction.get("rhythm_label", "")
+            nn_conf = condition_prediction.get("confidence", 0.0)
+
+            # High-confidence neural predictions for conditions the rule
+            # engine cannot detect from measurements alone
+            _NEURAL_ONLY_CONDITIONS = {
+                "atrial_flutter", "supraventricular_tachycardia",
+                "ventricular_tachycardia", "ventricular_fibrillation",
+                "left_bundle_branch_block", "right_bundle_branch_block",
+                "first_degree_av_block", "second_degree_av_block_type1",
+                "second_degree_av_block_type2", "st_elevation",
+                "premature_atrial_contractions", "premature_ventricular_contractions",
+            }
+
+            if nn_label in _NEURAL_ONLY_CONDITIONS and nn_conf >= 0.7:
+                classification = nn_label
+                confidence = round(nn_conf, 2)
+            elif nn_label == "atrial_fibrillation" and nn_conf >= 0.7:
+                # Neural model confirms or overrides AFib detection
+                classification = "atrial_fibrillation"
+                confidence = max(confidence, round(nn_conf, 2))
 
         # Regularity classification
         if regularity > 0.9:

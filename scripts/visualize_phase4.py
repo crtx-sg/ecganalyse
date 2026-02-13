@@ -37,6 +37,7 @@ from src.prediction.signal_beat_detector import SignalBasedBeatDetector
 from src.interpretation.symbolic import SymbolicCalculationEngine
 from src.interpretation.rules import RuleBasedReasoningEngine
 from src.interpretation.vitals_context import VitalsContextIntegrator
+from src.prediction.condition_classifier import ConditionClassifier
 from src.interpretation.assembly import JSONAssembler
 
 
@@ -80,19 +81,20 @@ def run_pipeline(hdf5_path, event_id, signal_based=False):
     ecg_np = event.ecg.as_array
     hm_np = None
 
+    ecg_tensor = torch.from_numpy(ecg_np).unsqueeze(0).float()
+
     if signal_based:
-        # Direct signal-based beat detection (bypasses untrained neural models)
+        # Direct signal-based beat detection (bypasses neural Phase 2-3)
         detector = SignalBasedBeatDetector(fs=200)
         beats = detector.detect(ecg_np)
     else:
         denoiser = ECGDenoiser()
         denoiser.eval()
-        ecg_tensor = torch.from_numpy(ecg_np).unsqueeze(0).float()
         with torch.no_grad():
             denoised = denoiser(ecg_tensor)
 
-        # Phase 2
-        encoder = FoundationModelAdapter(output_dim=256)
+        # Phase 2 (TransCovNet)
+        encoder = FoundationModelAdapter(output_dim=256, model_type="transcovnet")
         encoder.eval()
         with torch.no_grad():
             features = encoder(denoised)
@@ -107,13 +109,29 @@ def run_pipeline(hdf5_path, event_id, signal_based=False):
         extractor = FiducialExtractor()
         beats = extractor.extract(hm_np, ecg_np)
 
+    # Condition classification (always runs — uses raw ECG)
+    condition_dict = None
+    try:
+        classifier = ConditionClassifier()
+        condition_pred = classifier.classify(ecg_tensor)
+        condition_dict = {
+            "condition": condition_pred.condition,
+            "rhythm_label": condition_pred.rhythm_label,
+            "confidence": condition_pred.confidence,
+        }
+    except FileNotFoundError:
+        pass
+
     # Phase 4
     sym = SymbolicCalculationEngine(fs=200)
     measurements = sym.compute_global_measurements(beats)
     rhythm_metrics = sym.compute_rhythm_metrics(beats)
 
     rules = RuleBasedReasoningEngine()
-    rhythm = rules.classify_rhythm(measurements, rhythm_metrics, beats)
+    rhythm = rules.classify_rhythm(
+        measurements, rhythm_metrics, beats,
+        condition_prediction=condition_dict,
+    )
     findings = rules.generate_findings(measurements, rhythm, beats)
 
     vitals_integrator = VitalsContextIntegrator()

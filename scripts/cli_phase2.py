@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Phase 2 CLI harness: load HDF5 → preprocess → encode → JSON feature stats.
 
+Uses ECG-TransCovNet encoder (requires trained weights).
+
 Usage:
     python scripts/cli_phase2.py <hdf5_file> <event_id>
     python scripts/cli_phase2.py data/samples/PT1234_2024-01.h5 event_1001
 """
 
+import argparse
 import json
 import sys
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -22,19 +26,26 @@ from src.encoding.foundation import FoundationModelAdapter
 
 LEAD_ORDER = ["ECG1", "ECG2", "ECG3", "aVR", "aVL", "aVF", "vVX"]
 
+_TRANSCOVNET_WEIGHTS = (
+    Path(__file__).resolve().parents[1] / "models" / "ecg_transcovnet" / "best_model.pt"
+)
+
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <hdf5_file> <event_id>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Phase 2: ECG feature encoding")
+    parser.add_argument("hdf5_file", help="Path to HDF5 alarm event file")
+    parser.add_argument("event_id", help="Event ID (e.g. event_1001)")
+    args = parser.parse_args()
 
-    hdf5_path = sys.argv[1]
-    event_id = sys.argv[2]
+    if not _TRANSCOVNET_WEIGHTS.exists():
+        print(f"Error: TransCovNet weights not found at {_TRANSCOVNET_WEIGHTS}", file=sys.stderr)
+        print("Run train_ecg_transcovnet.py first.", file=sys.stderr)
+        sys.exit(1)
 
     # Phase 0: Load
     loader = HDF5AlarmEventLoader()
-    with loader.load_file(hdf5_path) as f:
-        event = loader.load_event(f, event_id)
+    with loader.load_file(args.hdf5_file) as f:
+        event = loader.load_event(f, args.event_id)
 
     # Phase 1: Quality + Denoise
     assessor = SignalQualityAssessor()
@@ -47,8 +58,8 @@ def main() -> None:
     with torch.no_grad():
         denoised = denoiser(x)  # [1, 7, 2400]
 
-    # Phase 2: Encode
-    encoder = FoundationModelAdapter(output_dim=256)
+    # Phase 2: Encode (TransCovNet only)
+    encoder = FoundationModelAdapter(output_dim=256, model_type="transcovnet")
     encoder.eval()
     with torch.no_grad():
         features = encoder(denoised)  # [1, 7, S, D]
@@ -69,6 +80,7 @@ def main() -> None:
     output = {
         "event_id": event.event_id,
         "quality_sqi": quality_report.overall_sqi,
+        "encoder_type": encoder.model_type,
         "encoder_output": {
             "shape": list(features_np.shape),
             "dtype": str(features_np.dtype),
