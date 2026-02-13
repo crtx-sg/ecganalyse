@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from config.settings import PipelineConfig
 from src.ecg_system.schemas import (
     AlarmEvent,
     Beat,
@@ -34,12 +35,13 @@ class JSONAssembler:
         self,
         event: AlarmEvent,
         quality: QualityReport,
-        measurements: GlobalMeasurements,
+        measurements: GlobalMeasurements | None,
         rhythm: RhythmAnalysis,
         beats: list[Beat],
         findings: list[Finding],
         calculation_traces: list[str],
         processing_start_time: float | None = None,
+        pipeline_config: PipelineConfig | None = None,
     ) -> dict[str, Any]:
         """Build the complete JSON Feature Assembly.
 
@@ -47,21 +49,25 @@ class JSONAssembler:
             event: The original alarm event (provides context, vitals, metadata).
             quality: Signal quality report from Phase 1.
             measurements: Global measurements from SymbolicCalculationEngine.
+                ``None`` when beat analysis is disabled.
             rhythm: Rhythm analysis from RuleBasedReasoningEngine.
             beats: Detected beats from Phase 3.
             findings: All clinical findings (rules + vitals).
             calculation_traces: Auditable trace strings.
             processing_start_time: time.monotonic() at pipeline start (optional).
+            pipeline_config: Pipeline configuration controlling which sections
+                are included in the output.
 
         Returns:
             JSON-serializable dictionary.
         """
+        cfg = pipeline_config or PipelineConfig()
         now = datetime.now(timezone.utc)
         processing_ms = 0.0
         if processing_start_time is not None:
             processing_ms = (time.monotonic() - processing_start_time) * 1000.0
 
-        return {
+        result: dict[str, Any] = {
             "schema_version": self.SCHEMA_VERSION,
             "generated_at": now.isoformat(),
             "processing_time_ms": round(processing_ms, 2),
@@ -69,15 +75,29 @@ class JSONAssembler:
             "metadata": self._build_metadata(event),
             "vitals_context": self._build_vitals_context(event.vitals),
             "quality": self._build_quality(quality),
-            "global_measurements": self._build_global_measurements(
-                measurements, event.vitals,
-            ),
             "rhythm": self._build_rhythm(rhythm),
-            "beats": self._build_beats(beats),
             "findings": self._build_findings(findings),
             "calculation_traces": calculation_traces,
-            "summary": self._build_summary(rhythm, findings, measurements),
+            "pipeline_config": {
+                "beat_analysis_enabled": cfg.enable_beat_analysis,
+                "heart_rate_enabled": cfg.enable_heart_rate,
+                "interval_measurements_enabled": cfg.enable_interval_measurements,
+                "beat_detector": cfg.beat_detector,
+            },
         }
+
+        if cfg.enable_beat_analysis and measurements is not None:
+            result["global_measurements"] = self._build_global_measurements(
+                measurements, event.vitals,
+            )
+            result["beats"] = self._build_beats(beats)
+        else:
+            result["global_measurements"] = None
+            result["beats"] = []
+
+        result["summary"] = self._build_summary(rhythm, findings, measurements)
+
+        return result
 
     # ------------------------------------------------------------------
     # Section builders
@@ -230,7 +250,7 @@ class JSONAssembler:
         self,
         rhythm: RhythmAnalysis,
         findings: list[Finding],
-        measurements: GlobalMeasurements,
+        measurements: GlobalMeasurements | None,
     ) -> dict[str, Any]:
         categories = sorted(set(f.category for f in findings))
         severity_rank = {"normal": 0, "mild": 1, "moderate": 2, "severe": 3, "critical": 4}

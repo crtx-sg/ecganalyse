@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Phase 4 CLI harness: HDF5 → full pipeline → JSON Feature Assembly.
 
-Uses ECG-TransCovNet for encoding and condition classification (requires
-trained weights).
+Defaults to signal-based beat detection (classical DSP) and TransCovNet
+condition classification. Use --heatmap to opt into the neural heatmap
+decoder for beat detection (requires trained heatmap model weights).
 
 Usage:
     python scripts/cli_phase4.py <hdf5_file> <event_id>
     python scripts/cli_phase4.py data/samples/PT1234_2024-01.h5 event_1001
+    python scripts/cli_phase4.py data/samples/PT1234_2024-01.h5 event_1001 --heatmap
 """
 
 import argparse
@@ -23,10 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.data.hdf5_loader import HDF5AlarmEventLoader
 from src.preprocessing.quality import SignalQualityAssessor
-from src.preprocessing.denoiser import ECGDenoiser
-from src.encoding.foundation import FoundationModelAdapter
-from src.prediction.heatmap import HeatmapDecoder
-from src.prediction.fiducial import FiducialExtractor
+from src.prediction.signal_beat_detector import SignalBasedBeatDetector
 from src.prediction.condition_classifier import ConditionClassifier
 from src.interpretation.symbolic import SymbolicCalculationEngine
 from src.interpretation.rules import RuleBasedReasoningEngine
@@ -42,6 +41,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 4 CLI: full interpretation pipeline")
     parser.add_argument("hdf5_file", help="Path to HDF5 file")
     parser.add_argument("event_id", help="Event ID (e.g. event_1001)")
+    parser.add_argument("--heatmap", action="store_true",
+                        help="Use neural heatmap decoder for beat detection "
+                             "(requires trained heatmap model weights)")
     args = parser.parse_args()
 
     if not _TRANSCOVNET_WEIGHTS.exists():
@@ -56,33 +58,43 @@ def main() -> None:
     with loader.load_file(args.hdf5_file) as f:
         event = loader.load_event(f, args.event_id)
 
-    # Phase 1: Quality + Denoise
+    # Phase 1: Quality
     assessor = SignalQualityAssessor()
     quality = assessor.assess(event.ecg)
 
     ecg_np = event.ecg.as_array
     ecg_tensor = torch.from_numpy(ecg_np).unsqueeze(0).float()
 
-    denoiser = ECGDenoiser()
-    denoiser.eval()
-    with torch.no_grad():
-        denoised = denoiser(ecg_tensor)
+    # Phase 3a: Beat detection
+    if args.heatmap:
+        # Neural heatmap pipeline (requires trained decoder weights)
+        from src.preprocessing.denoiser import ECGDenoiser
+        from src.encoding.foundation import FoundationModelAdapter
+        from src.prediction.heatmap import HeatmapDecoder
+        from src.prediction.fiducial import FiducialExtractor
 
-    # Phase 2: Encode (TransCovNet only)
-    encoder = FoundationModelAdapter(output_dim=256, model_type="transcovnet")
-    encoder.eval()
-    with torch.no_grad():
-        features = encoder(denoised)
+        denoiser = ECGDenoiser()
+        denoiser.eval()
+        with torch.no_grad():
+            denoised = denoiser(ecg_tensor)
 
-    # Phase 3a: Decode heatmaps → extract fiducials
-    decoder = HeatmapDecoder(d_model=256)
-    decoder.eval()
-    with torch.no_grad():
-        heatmaps = decoder(features)
+        encoder = FoundationModelAdapter(output_dim=256, model_type="transcovnet")
+        encoder.eval()
+        with torch.no_grad():
+            features = encoder(denoised)
 
-    hm_np = heatmaps.squeeze(0).numpy()
-    extractor = FiducialExtractor()
-    beats = extractor.extract(hm_np, ecg_np)
+        decoder = HeatmapDecoder(d_model=256)
+        decoder.eval()
+        with torch.no_grad():
+            heatmaps = decoder(features)
+
+        hm_np = heatmaps.squeeze(0).numpy()
+        extractor = FiducialExtractor()
+        beats = extractor.extract(hm_np, ecg_np)
+    else:
+        # Signal-based beat detection (default — no neural model needed)
+        detector = SignalBasedBeatDetector(fs=200)
+        beats = detector.detect(ecg_np)
 
     # Phase 3b: Neural condition classification
     classifier = ConditionClassifier()

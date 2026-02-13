@@ -44,7 +44,7 @@ class RuleBasedReasoningEngine:
 
     def classify_rhythm(
         self,
-        measurements: GlobalMeasurements,
+        measurements: GlobalMeasurements | None,
         rhythm_metrics: dict[str, float],
         beats: list[Beat],
         condition_prediction: Optional[dict] = None,
@@ -61,8 +61,6 @@ class RuleBasedReasoningEngine:
                 augments or overrides the rule-based classification for conditions
                 that rules alone struggle with.
         """
-        hr = measurements.heart_rate_bpm
-        rr_std = measurements.rr_std_ms
         p_ratio = rhythm_metrics.get("p_wave_presence_ratio", 0.0)
         regularity = rhythm_metrics.get("regularity_score", 0.0)
 
@@ -73,33 +71,38 @@ class RuleBasedReasoningEngine:
         classification = "undetermined"
         confidence = 0.5
 
-        if hr <= 0:
-            classification = "undetermined"
-            confidence = 0.0
-        elif hr < rhythm_rules.get("sinus_bradycardia", {}).get("hr_max_bpm", 60):
-            classification = "sinus_bradycardia"
-            confidence = 0.8
-        elif hr >= rhythm_rules.get("sinus_tachycardia", {}).get("hr_min_bpm", 100):
-            classification = "sinus_tachycardia"
-            confidence = 0.8
-        elif (
-            nsr.get("hr_min_bpm", 60) <= hr <= nsr.get("hr_max_bpm", 100)
-            and rr_std <= nsr.get("rr_std_max_ms", 120)
-            and p_ratio >= nsr.get("p_wave_presence_min", 0.8)
-        ):
-            classification = "normal_sinus_rhythm"
-            confidence = 0.9
-        else:
-            # Check for irregular rhythm (possible AFib)
-            if rr_std > nsr.get("rr_std_max_ms", 120) and p_ratio < 0.5:
-                classification = "atrial_fibrillation"
-                confidence = 0.6
-            elif p_ratio < nsr.get("p_wave_presence_min", 0.8):
-                classification = "irregular_rhythm"
-                confidence = 0.5
-            else:
+        # When measurements are unavailable (beat analysis disabled), skip
+        # HR-based rule classification and rely on neural predictions below.
+        if measurements is not None:
+            hr = measurements.heart_rate_bpm
+            rr_std = measurements.rr_std_ms
+            if hr <= 0:
+                classification = "undetermined"
+                confidence = 0.0
+            elif hr < rhythm_rules.get("sinus_bradycardia", {}).get("hr_max_bpm", 60):
+                classification = "sinus_bradycardia"
+                confidence = 0.8
+            elif hr >= rhythm_rules.get("sinus_tachycardia", {}).get("hr_min_bpm", 100):
+                classification = "sinus_tachycardia"
+                confidence = 0.8
+            elif (
+                nsr.get("hr_min_bpm", 60) <= hr <= nsr.get("hr_max_bpm", 100)
+                and rr_std <= nsr.get("rr_std_max_ms", 120)
+                and p_ratio >= nsr.get("p_wave_presence_min", 0.8)
+            ):
                 classification = "normal_sinus_rhythm"
-                confidence = 0.7
+                confidence = 0.9
+            else:
+                # Check for irregular rhythm (possible AFib)
+                if rr_std > nsr.get("rr_std_max_ms", 120) and p_ratio < 0.5:
+                    classification = "atrial_fibrillation"
+                    confidence = 0.6
+                elif p_ratio < nsr.get("p_wave_presence_min", 0.8):
+                    classification = "irregular_rhythm"
+                    confidence = 0.5
+                else:
+                    classification = "normal_sinus_rhythm"
+                    confidence = 0.7
 
         # Neural condition prediction override/augmentation
         # The trained ECG-TransCovNet can detect conditions that are hard
@@ -145,7 +148,7 @@ class RuleBasedReasoningEngine:
             p_morph = "absent"
 
         # P-QRS relationship
-        pr = measurements.pr_interval_ms
+        pr = measurements.pr_interval_ms if measurements is not None else None
         if p_ratio >= 0.8 and pr is not None:
             p_qrs = "1:1_consistent" if 120 <= pr <= 200 else "1:1_variable"
         elif p_ratio < 0.3:
@@ -173,7 +176,7 @@ class RuleBasedReasoningEngine:
 
     def generate_findings(
         self,
-        measurements: GlobalMeasurements,
+        measurements: GlobalMeasurements | None,
         rhythm: RhythmAnalysis,
         beats: list[Beat],
     ) -> list[Finding]:
@@ -183,11 +186,13 @@ class RuleBasedReasoningEngine:
         # Rhythm findings
         findings.append(self._rhythm_finding(rhythm))
 
-        # Conduction findings
-        findings.extend(self._conduction_findings(measurements))
+        # Conduction findings (require measurements)
+        if measurements is not None:
+            findings.extend(self._conduction_findings(measurements))
 
         # Morphology findings from beats
-        findings.extend(self._morphology_findings(beats))
+        if beats:
+            findings.extend(self._morphology_findings(beats))
 
         return findings
 

@@ -38,11 +38,38 @@ class PreprocessingConfig:
 
 
 @dataclass
+class PipelineConfig:
+    """Controls which pipeline components are enabled.
+
+    When the heatmap model is untrained or fiducial/HR results are unreliable,
+    individual measurement stages can be disabled while still running the
+    arrhythmia classification (neural condition classifier).
+    """
+
+    enable_beat_analysis: bool = True
+    """Enable beat detection, fiducial extraction, and per-beat analysis.
+    When False, Phase 3 fiducial/beat pipeline is skipped entirely."""
+
+    enable_heart_rate: bool = True
+    """Enable heart rate calculation from R-peak intervals.
+    Requires enable_beat_analysis=True to have effect."""
+
+    enable_interval_measurements: bool = True
+    """Enable PR, QRS, QT, QTc interval measurements.
+    Requires enable_beat_analysis=True to have effect."""
+
+    beat_detector: str = "signal"
+    """Beat detection method: 'signal' (classical DSP) or 'heatmap' (neural).
+    The 'signal' detector works without a trained heatmap model."""
+
+
+@dataclass
 class Settings:
     """Top-level application settings."""
 
     loader: LoaderConfig = field(default_factory=LoaderConfig)
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     data_dir: str = "data"
     model_weights_dir: str = "models/weights"
     log_level: str = "INFO"
@@ -73,6 +100,8 @@ class Settings:
             settings.loader = LoaderConfig(**data["loader"])
         if "preprocessing" in data:
             settings.preprocessing = PreprocessingConfig(**data["preprocessing"])
+        if "pipeline" in data:
+            settings.pipeline = PipelineConfig(**data["pipeline"])
         for key in ("data_dir", "model_weights_dir", "log_level", "llm_provider", "llm_api_key"):
             if key in data:
                 setattr(settings, key, data[key])

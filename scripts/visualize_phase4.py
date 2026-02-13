@@ -5,11 +5,14 @@ Runs full pipeline Phase 0–4 on an HDF5 event and produces:
   1. Multi-panel clinical summary figure (PNG)
   2. JSON Feature Assembly printed to stdout (optional)
 
+Defaults to signal-based beat detection (classical DSP). Use --heatmap to
+opt into the neural heatmap decoder (requires trained weights).
+
 Usage:
     python scripts/visualize_phase4.py data/samples/PT1234_2024-01.h5 event_1001
     python scripts/visualize_phase4.py data/samples/PT9401_2026-02.h5 event_1001 --output afib_report.png
     python scripts/visualize_phase4.py data/samples/PT1234_2024-01.h5 event_1001 --json
-    python scripts/visualize_phase4.py data/samples/PT1234_2024-01.h5 event_1001 --all-leads
+    python scripts/visualize_phase4.py data/samples/PT1234_2024-01.h5 event_1001 --heatmap
 """
 
 import argparse
@@ -60,13 +63,13 @@ SEVERITY_EMOJI = {
 }
 
 
-def run_pipeline(hdf5_path, event_id, signal_based=False):
+def run_pipeline(hdf5_path, event_id, signal_based=True):
     """Run Phase 0-4 and return (assembly_dict, event, beats, heatmaps_np, ecg_np).
 
     Args:
-        signal_based: If True, skip neural Phase 2-3 and use direct signal
-                      analysis for beat detection. Recommended for clean data
-                      or when neural models are untrained.
+        signal_based: If True (default), use direct signal analysis for beat
+                      detection (classical DSP). If False, use the neural
+                      heatmap decoder (requires trained heatmap model weights).
     """
     start = time.monotonic()
 
@@ -169,13 +172,18 @@ def plot_report(result, event, beats, hm_np, ecg_np, leads_to_show, output_path)
     # --- Title bar ---
     ctx = result["event_context"]
     rhythm_clf = result["rhythm"]["classification"].replace("_", " ").title()
-    hr = result["global_measurements"]["heart_rate_bpm"]
+    gm = result.get("global_measurements")
     patient = ctx.get("patient_id", "Unknown")
     sqi = result["quality"]["overall_sqi"]
 
+    if gm is not None:
+        hr_str = f"HR {gm['heart_rate_bpm']:.0f} bpm"
+    else:
+        hr_str = "HR N/A"
+
     title = (
         f"ECG Interpretation Report  |  {patient}  |  {ctx['event_id']}  |  "
-        f"{rhythm_clf}  |  HR {hr:.0f} bpm  |  SQI {sqi:.2f}"
+        f"{rhythm_clf}  |  {hr_str}  |  SQI {sqi:.2f}"
     )
     fig.suptitle(title, fontsize=14, fontweight="bold", y=0.995, color="#2c3e50")
 
@@ -244,23 +252,25 @@ def plot_report(result, event, beats, hm_np, ecg_np, leads_to_show, output_path)
     ax_meas = fig.add_subplot(gs[n_rows_ecg + 1, 0])
     ax_meas.axis("off")
 
-    gm = result["global_measurements"]
-    rr = gm["rr_intervals_ms"]
     rhythm_info = result["rhythm"]
 
-    meas_lines = [
-        f"Heart Rate:  {gm['heart_rate_bpm']:.1f} bpm",
-        f"RR Mean:  {rr['mean']:.0f} ms  (std {rr['std']:.0f}, range {rr['min']:.0f}-{rr['max']:.0f})",
-        f"QRS Duration:  {gm['qrs_duration_ms']['median']:.0f} ms",
-        f"QT Interval:  {gm['qt_interval_ms']:.0f} ms",
-        f"QTc Bazett:  {gm['qtc_bazett_ms']:.1f} ms",
-        f"QTc Fridericia:  {gm['qtc_fridericia_ms']:.1f} ms",
-    ]
-    pr = gm.get("pr_interval_ms")
-    if pr and isinstance(pr, dict):
-        meas_lines.insert(2, f"PR Interval:  {pr['median']:.0f} ms")
-    elif pr is not None:
-        meas_lines.insert(2, f"PR Interval:  {pr:.0f} ms")
+    if gm is not None:
+        rr = gm["rr_intervals_ms"]
+        meas_lines = [
+            f"Heart Rate:  {gm['heart_rate_bpm']:.1f} bpm",
+            f"RR Mean:  {rr['mean']:.0f} ms  (std {rr['std']:.0f}, range {rr['min']:.0f}-{rr['max']:.0f})",
+            f"QRS Duration:  {gm['qrs_duration_ms']['median']:.0f} ms",
+            f"QT Interval:  {gm['qt_interval_ms']:.0f} ms",
+            f"QTc Bazett:  {gm['qtc_bazett_ms']:.1f} ms",
+            f"QTc Fridericia:  {gm['qtc_fridericia_ms']:.1f} ms",
+        ]
+        pr = gm.get("pr_interval_ms")
+        if pr and isinstance(pr, dict):
+            meas_lines.insert(2, f"PR Interval:  {pr['median']:.0f} ms")
+        elif pr is not None:
+            meas_lines.insert(2, f"PR Interval:  {pr:.0f} ms")
+    else:
+        meas_lines = ["Beat analysis disabled — no measurements available"]
 
     for i, line in enumerate(meas_lines):
         y = 0.92 - i * 0.13
@@ -347,7 +357,7 @@ def plot_report(result, event, beats, hm_np, ecg_np, leads_to_show, output_path)
                 row += 1
 
         # HR validation
-        hrv = gm.get("heart_rate_validation")
+        hrv = gm.get("heart_rate_validation") if gm is not None else None
         if hrv:
             y = 0.88 - row * 0.12
             status = hrv["status"].upper()
@@ -412,8 +422,9 @@ def main():
                         help="Output PNG path (default: phase4_report.png)")
     parser.add_argument("--json", action="store_true",
                         help="Also print full JSON assembly to stdout")
-    parser.add_argument("--signal-based", action="store_true",
-                        help="Use signal-based beat detection (bypasses neural Phase 2-3)")
+    parser.add_argument("--heatmap", action="store_true",
+                        help="Use neural heatmap decoder for beat detection "
+                             "(requires trained heatmap model weights)")
 
     args = parser.parse_args()
 
@@ -422,15 +433,20 @@ def main():
     else:
         leads = args.leads
 
-    mode = "signal-based" if args.signal_based else "neural (Phase 2-3)"
+    use_signal = not args.heatmap
+    mode = "signal-based" if use_signal else "neural (Phase 2-3)"
     print(f"Running Phase 0-4 pipeline on {args.hdf5_file} / {args.event_id} [{mode}] ...")
     result, event, beats, hm_np, ecg_np = run_pipeline(
-        args.hdf5_file, args.event_id, signal_based=args.signal_based,
+        args.hdf5_file, args.event_id, signal_based=use_signal,
     )
 
     print(f"  Detected {len(beats)} beats")
     print(f"  Rhythm: {result['rhythm']['classification']}")
-    print(f"  HR: {result['global_measurements']['heart_rate_bpm']:.1f} bpm")
+    gm = result.get("global_measurements")
+    if gm is not None:
+        print(f"  HR: {gm['heart_rate_bpm']:.1f} bpm")
+    else:
+        print(f"  HR: N/A (beat analysis disabled)")
     print(f"  Findings: {len(result['findings'])}")
     print(f"  Processing: {result['processing_time_ms']:.0f} ms")
 

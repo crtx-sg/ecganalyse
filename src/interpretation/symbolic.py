@@ -21,10 +21,19 @@ class SymbolicCalculationEngine:
 
     Args:
         fs: Sampling rate in Hz (default 200).
+        enable_heart_rate: Compute heart rate from RR intervals (default True).
+        enable_intervals: Compute PR, QRS, QT, QTc intervals (default True).
     """
 
-    def __init__(self, fs: int = 200) -> None:
+    def __init__(
+        self,
+        fs: int = 200,
+        enable_heart_rate: bool = True,
+        enable_intervals: bool = True,
+    ) -> None:
         self.fs = fs
+        self.enable_heart_rate = enable_heart_rate
+        self.enable_intervals = enable_intervals
         self.traces: list[str] = []
 
     def compute_global_measurements(
@@ -40,64 +49,74 @@ class SymbolicCalculationEngine:
         """
         self.traces.clear()
 
-        # RR intervals from consecutive R-peaks
-        rr_intervals = self._compute_rr_intervals(beats)
+        # HR and RR intervals
+        hr = 0.0
+        rr_mean = 0.0
+        rr_std = 0.0
+        rr_min = 0.0
+        rr_max = 0.0
 
-        # Heart rate
-        hr = self._compute_heart_rate(rr_intervals)
+        if self.enable_heart_rate:
+            rr_intervals = self._compute_rr_intervals(beats)
+            hr = self._compute_heart_rate(rr_intervals)
+            rr_mean = float(np.mean(rr_intervals)) if rr_intervals else 0.0
+            rr_std = float(np.std(rr_intervals)) if rr_intervals else 0.0
+            rr_min = float(np.min(rr_intervals)) if rr_intervals else 0.0
+            rr_max = float(np.max(rr_intervals)) if rr_intervals else 0.0
 
-        # RR statistics
-        rr_mean = float(np.mean(rr_intervals)) if rr_intervals else 0.0
-        rr_std = float(np.std(rr_intervals)) if rr_intervals else 0.0
-        rr_min = float(np.min(rr_intervals)) if rr_intervals else 0.0
-        rr_max = float(np.max(rr_intervals)) if rr_intervals else 0.0
+            if rr_intervals:
+                self.traces.append(
+                    f"RR intervals (n={len(rr_intervals)}): "
+                    f"mean={rr_mean:.1f}ms, std={rr_std:.1f}ms, "
+                    f"min={rr_min:.1f}ms, max={rr_max:.1f}ms"
+                )
+        else:
+            self.traces.append("Heart rate calculation: disabled by pipeline config")
 
-        if rr_intervals:
-            self.traces.append(
-                f"RR intervals (n={len(rr_intervals)}): "
-                f"mean={rr_mean:.1f}ms, std={rr_std:.1f}ms, "
-                f"min={rr_min:.1f}ms, max={rr_max:.1f}ms"
-            )
-
-        # Per-beat intervals
-        pr_values = self._collect_intervals(beats, "pr_interval_ms")
-        qrs_values = self._collect_intervals(beats, "qrs_duration_ms")
-        qt_values = self._collect_intervals(beats, "qt_interval_ms")
-
-        # PR interval (median)
+        # Per-beat interval measurements
         pr_ms: Optional[float] = None
         pr_range: Optional[tuple[float, float]] = None
-        if pr_values:
-            pr_ms = float(np.median(pr_values))
-            pr_range = (float(np.min(pr_values)), float(np.max(pr_values)))
-            self.traces.append(
-                f"PR interval: median={pr_ms:.1f}ms from {len(pr_values)} beats "
-                f"(range {pr_range[0]:.1f}-{pr_range[1]:.1f}ms)"
-            )
+        qrs_ms = 0.0
+        qrs_range = (0.0, 0.0)
+        qt_ms = 0.0
+        qtc_bazett = 0.0
+        qtc_fridericia = 0.0
 
-        # QRS duration (median)
-        qrs_ms = float(np.median(qrs_values)) if qrs_values else 0.0
-        qrs_range = (
-            (float(np.min(qrs_values)), float(np.max(qrs_values)))
-            if qrs_values
-            else (0.0, 0.0)
-        )
-        if qrs_values:
-            self.traces.append(
-                f"QRS duration: median={qrs_ms:.1f}ms from {len(qrs_values)} beats "
-                f"(range {qrs_range[0]:.1f}-{qrs_range[1]:.1f}ms)"
-            )
+        if self.enable_intervals:
+            pr_values = self._collect_intervals(beats, "pr_interval_ms")
+            qrs_values = self._collect_intervals(beats, "qrs_duration_ms")
+            qt_values = self._collect_intervals(beats, "qt_interval_ms")
 
-        # QT interval (median)
-        qt_ms = float(np.median(qt_values)) if qt_values else 0.0
-        if qt_values:
-            self.traces.append(
-                f"QT interval: median={qt_ms:.1f}ms from {len(qt_values)} beats"
-            )
+            if pr_values:
+                pr_ms = float(np.median(pr_values))
+                pr_range = (float(np.min(pr_values)), float(np.max(pr_values)))
+                self.traces.append(
+                    f"PR interval: median={pr_ms:.1f}ms from {len(pr_values)} beats "
+                    f"(range {pr_range[0]:.1f}-{pr_range[1]:.1f}ms)"
+                )
 
-        # QTc (Bazett and Fridericia)
-        qtc_bazett = self._compute_qtc_bazett(qt_ms, rr_mean)
-        qtc_fridericia = self._compute_qtc_fridericia(qt_ms, rr_mean)
+            qrs_ms = float(np.median(qrs_values)) if qrs_values else 0.0
+            qrs_range = (
+                (float(np.min(qrs_values)), float(np.max(qrs_values)))
+                if qrs_values
+                else (0.0, 0.0)
+            )
+            if qrs_values:
+                self.traces.append(
+                    f"QRS duration: median={qrs_ms:.1f}ms from {len(qrs_values)} beats "
+                    f"(range {qrs_range[0]:.1f}-{qrs_range[1]:.1f}ms)"
+                )
+
+            qt_ms = float(np.median(qt_values)) if qt_values else 0.0
+            if qt_values:
+                self.traces.append(
+                    f"QT interval: median={qt_ms:.1f}ms from {len(qt_values)} beats"
+                )
+
+            qtc_bazett = self._compute_qtc_bazett(qt_ms, rr_mean)
+            qtc_fridericia = self._compute_qtc_fridericia(qt_ms, rr_mean)
+        else:
+            self.traces.append("Interval measurements: disabled by pipeline config")
 
         return GlobalMeasurements(
             heart_rate_bpm=round(hr, 1),

@@ -161,52 +161,51 @@ class SignalBasedBeatDetector:
     ) -> dict[str, FiducialPoint]:
         """Estimate all 9 fiducial points from signal morphology."""
         fiducials: dict[str, FiducialPoint] = {}
-        n = len(raw)
 
         # R-peak (known)
         fiducials["R_peak"] = self._fp(r_sample, confidence=0.95)
 
-        # QRS onset: search backwards from R-peak for zero-crossing or slope change
-        # Typically 30-60ms before R-peak
-        qrs_search_start = max(start, r_sample - int(0.08 * self.fs))
-        qrs_search_end = r_sample
-        qrs_onset = self._find_onset(filtered, qrs_search_start, qrs_search_end, direction="backward")
+        # QRS onset/offset using derivative-based detection
+        qrs_onset, qrs_offset = self._find_qrs_boundaries(
+            filtered, r_sample, start, end,
+        )
         if qrs_onset is not None:
             fiducials["QRS_onset"] = self._fp(qrs_onset, confidence=0.85)
-
-        # QRS offset: search forward from R-peak
-        qrs_off_start = r_sample
-        qrs_off_end = min(end, r_sample + int(0.08 * self.fs))
-        qrs_offset = self._find_onset(filtered, qrs_off_start, qrs_off_end, direction="forward")
         if qrs_offset is not None:
             fiducials["QRS_offset"] = self._fp(qrs_offset, confidence=0.85)
 
-        # P-wave: search 120-250ms before R-peak
-        p_region_start = max(start, r_sample - int(0.25 * self.fs))
-        p_region_end = max(start, r_sample - int(0.08 * self.fs))
+        # P-wave: search 120-280ms before R-peak
+        p_region_start = max(start, r_sample - int(0.28 * self.fs))
+        p_region_end = max(start, r_sample - int(0.10 * self.fs))
         if p_region_end > p_region_start + 5:
             p_peak = self._find_wave_peak(filtered, p_region_start, p_region_end)
             if p_peak is not None:
                 fiducials["P_peak"] = self._fp(p_peak, confidence=0.80)
-                # P onset: ~40ms before P_peak
-                p_on = max(start, p_peak - int(0.04 * self.fs))
+                # Find P-wave edges using signal morphology
+                p_on = self._find_wave_edge(
+                    filtered, p_peak, p_region_start, direction="backward",
+                )
+                p_off = self._find_wave_edge(
+                    filtered, p_peak, p_region_end, direction="forward",
+                )
                 fiducials["P_onset"] = self._fp(p_on, confidence=0.70)
-                # P offset: ~40ms after P_peak
-                p_off = min(p_region_end, p_peak + int(0.04 * self.fs))
                 fiducials["P_offset"] = self._fp(p_off, confidence=0.70)
 
-        # T-wave: search 150-400ms after R-peak
+        # T-wave: search 150-450ms after R-peak
         t_region_start = min(end - 1, r_sample + int(0.15 * self.fs))
-        t_region_end = min(end, r_sample + int(0.40 * self.fs))
+        t_region_end = min(end, r_sample + int(0.45 * self.fs))
         if t_region_end > t_region_start + 5:
             t_peak = self._find_wave_peak(filtered, t_region_start, t_region_end)
             if t_peak is not None:
                 fiducials["T_peak"] = self._fp(t_peak, confidence=0.75)
-                # T onset: ~60ms before T_peak
-                t_on = max(t_region_start, t_peak - int(0.06 * self.fs))
+                # Find T-wave edges using signal morphology
+                t_on = self._find_wave_edge(
+                    filtered, t_peak, t_region_start, direction="backward",
+                )
+                t_off = self._find_wave_edge(
+                    filtered, t_peak, t_region_end, direction="forward",
+                )
                 fiducials["T_onset"] = self._fp(t_on, confidence=0.65)
-                # T offset: ~80ms after T_peak
-                t_off = min(end - 1, t_peak + int(0.08 * self.fs))
                 fiducials["T_offset"] = self._fp(t_off, confidence=0.65)
 
         return fiducials
@@ -218,43 +217,152 @@ class SignalBasedBeatDetector:
             confidence=confidence,
         )
 
-    def _find_onset(
-        self, sig: np.ndarray, start: int, end: int, direction: str,
-    ) -> int | None:
-        """Find QRS onset/offset by looking for where signal crosses baseline."""
-        if end <= start:
-            return None
-        segment = sig[start:end]
-        baseline = np.median(segment)
-        threshold = baseline + 0.15 * (np.max(np.abs(segment - baseline)))
+    def _find_qrs_boundaries(
+        self,
+        filtered: np.ndarray,
+        r_sample: int,
+        start: int,
+        end: int,
+    ) -> tuple[int | None, int | None]:
+        """Find QRS onset and offset using derivative-based detection.
+
+        Uses the signal slope to locate where the QRS complex begins
+        (rapid deflection from baseline) and ends (return to baseline).
+        The baseline is estimated from the signal *outside* the QRS region.
+        """
+        n = len(filtered)
+
+        # --- QRS onset: search 100ms window before R-peak ---
+        onset_start = max(start, r_sample - int(0.10 * self.fs))
+        onset_seg = filtered[onset_start:r_sample + 1]
+        qrs_onset = None
+
+        if len(onset_seg) >= 4:
+            # Baseline = mean of the first few samples (before QRS starts)
+            baseline_pre = np.mean(onset_seg[:max(3, len(onset_seg) // 4)])
+            r_val = onset_seg[-1]
+            deviation = abs(r_val - baseline_pre)
+
+            if deviation > 1e-8:
+                # QRS onset = first sample deviating >15% of R-to-baseline amplitude
+                thresh = 0.15 * deviation
+                for i in range(len(onset_seg)):
+                    if abs(onset_seg[i] - baseline_pre) > thresh:
+                        qrs_onset = onset_start + i
+                        break
+
+        # --- QRS offset: search 100ms window after R-peak ---
+        offset_end = min(end, r_sample + int(0.10 * self.fs))
+        offset_seg = filtered[r_sample:offset_end]
+        qrs_offset = None
+
+        if len(offset_seg) >= 4:
+            # Baseline = mean of the last few samples (after QRS ends)
+            baseline_post = np.mean(offset_seg[-max(3, len(offset_seg) // 4):])
+            r_val = offset_seg[0]
+            deviation = abs(r_val - baseline_post)
+
+            if deviation > 1e-8:
+                thresh = 0.15 * deviation
+                # Walk forward from R-peak; offset = first sample within threshold
+                for i in range(len(offset_seg)):
+                    if abs(offset_seg[i] - baseline_post) <= thresh:
+                        qrs_offset = r_sample + i
+                        break
+
+        return qrs_onset, qrs_offset
+
+    def _find_wave_edge(
+        self,
+        sig: np.ndarray,
+        peak_sample: int,
+        boundary: int,
+        direction: str,
+    ) -> int:
+        """Find the onset or offset of a wave (P or T) from its peak.
+
+        Searches outward from *peak_sample* toward *boundary* for the point
+        where the signal amplitude drops below 25% of the peak-to-baseline
+        amplitude. Falls back to the midpoint between peak and boundary.
+
+        Args:
+            sig: Filtered signal array.
+            peak_sample: Sample index of the wave's peak.
+            boundary: Search limit (start of region for backward, end for forward).
+            direction: ``"backward"`` for onset, ``"forward"`` for offset.
+
+        Returns:
+            Sample index of the estimated edge.
+        """
+        if direction == "backward":
+            seg_start, seg_end = boundary, peak_sample
+        else:
+            seg_start, seg_end = peak_sample, boundary
+
+        if seg_end <= seg_start + 1:
+            return boundary
+
+        segment = sig[seg_start:seg_end + 1]
+
+        # Baseline = value at the far edge from the peak
+        if direction == "backward":
+            baseline = float(segment[0])
+            peak_val = float(segment[-1])
+        else:
+            baseline = float(segment[-1])
+            peak_val = float(segment[0])
+
+        amplitude = abs(peak_val - baseline)
+        if amplitude < 1e-8:
+            # Flat segment — use midpoint
+            return (peak_sample + boundary) // 2
+
+        thresh = 0.25 * amplitude  # 25% of wave amplitude
 
         if direction == "backward":
-            # Walk backward from end
-            for i in range(len(segment) - 1, 0, -1):
-                if abs(segment[i] - baseline) < threshold:
-                    return start + i
+            # Walk backward from peak toward boundary
+            for i in range(len(segment) - 1, -1, -1):
+                if abs(segment[i] - baseline) <= thresh:
+                    return seg_start + i
         else:
-            # Walk forward from start
+            # Walk forward from peak toward boundary
             for i in range(len(segment)):
-                if abs(segment[i] - baseline) < threshold:
-                    return start + i
-        return start if direction == "backward" else end - 1
+                if abs(segment[i] - baseline) <= thresh:
+                    return seg_start + i
+
+        return boundary
 
     def _find_wave_peak(
         self, sig: np.ndarray, start: int, end: int,
     ) -> int | None:
-        """Find the dominant peak in a search region."""
+        """Find the dominant peak in a search region.
+
+        Uses adaptive prominence thresholding based on the overall signal
+        noise floor rather than the local segment std.
+        """
         if end <= start + 2:
             return None
         segment = sig[start:end]
+
+        # Estimate noise floor from the full signal's median absolute deviation
+        overall_mad = np.median(np.abs(sig - np.median(sig)))
+        min_prominence = max(0.5 * overall_mad, 1e-4)
+
         # Look for positive peak first
-        peaks, props = find_peaks(segment, prominence=0.01 * np.std(segment))
+        peaks, props = find_peaks(segment, prominence=min_prominence)
         if len(peaks) > 0:
             best = peaks[np.argmax(segment[peaks])]
             return start + int(best)
-        # Fallback: argmax
+
+        # Try negative peaks (inverted waves)
+        neg_peaks, neg_props = find_peaks(-segment, prominence=min_prominence)
+        if len(neg_peaks) > 0:
+            best = neg_peaks[np.argmax(-segment[neg_peaks])]
+            return start + int(best)
+
+        # Fallback: argmax if amplitude is meaningful
         idx = int(np.argmax(np.abs(segment)))
-        if np.abs(segment[idx]) > 0.02 * np.std(sig):
+        if np.abs(segment[idx]) > 2 * overall_mad:
             return start + idx
         return None
 
